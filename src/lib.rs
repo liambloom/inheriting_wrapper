@@ -1,8 +1,9 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use std::iter;
-use syn::{self, Attribute, FnArg::{self, *}, Generics, Ident, ImplItemConst, ImplItemMethod, ImplItemType, Pat, PathArguments, Result, Signature, Token, TraitItem, TraitItemConst, TraitItemMethod, TraitItemType, Type, Visibility, ext::IdentExt, parse::{Parse, ParseStream}, parse, punctuated::Punctuated};
-use quote::{quote};
+// I'm importing like 20 things (and counting) from syn, so I just used the *
+use syn::{*, FnArg::*, ext::IdentExt, parse::{Parse, ParseStream}, punctuated::Punctuated};
+use quote::quote;
 
 // A lot of this code is copied (and modified) from syn
 // TODO: Add credit (not legally required, syn can be licensed under apache-2.0 and has no NOTICE file)
