@@ -42,6 +42,7 @@ impl Parse for AbstractConst {
     }
 }
 
+#[derive(Clone)]
 struct AbstractMethod {
     pub attrs: Vec<Attribute>,
     pub vis: Visibility,
@@ -62,6 +63,7 @@ impl Parse for AbstractMethod {
     }
 }
 
+#[derive(Clone)]
 struct AbstractType {
     pub attrs: Vec<Attribute>,
     pub vis: Visibility,
@@ -262,123 +264,73 @@ pub fn use_inner(args: TokenStream, item: TokenStream) -> TokenStream {
     };
     out.into()
 }
+
+enum UseInnerArg {
+    Full { 
+        field: Ident,
+        ty: Type
+    },
+    One(Type),
 }
 
-fn get_ident(args: TokenStream) -> Ident {
-    match parse_args(args.clone()) {
-        Some((ident, _)) => ident,
-        None => parse(args).unwrap()
+impl Parse for UseInnerArg {
+    fn parse(input: ParseStream) -> Result<Self> {
+        if input.peek2(Token![:]) {
+            Ok(Self::Full {
+                field: input.parse()?,
+                ty: {
+                    input.parse::<Token![:]>()?;
+                    let mut ty = input.parse()?;
+                    add_fishtail(&mut ty);
+                    ty
+                },
+            })
+        }
+        else {
+            Ok(Self::One({
+                let mut ty = input.parse()?;
+                add_fishtail(&mut ty);
+                ty
+            }))
+        }
     }
 }
 
-fn get_type(args: TokenStream) -> Type {
-    // TODO add fishtail
-    let mut ty = match parse_args(args.clone()) {
-        Some((_, ty)) => ty,
-        None => parse(args).unwrap()
-    };
-    if let Type::Path(path) = &mut ty {
+fn add_fishtail(ty: &mut Type) {
+    if let Type::Path(path) = ty {
         if let PathArguments::AngleBracketed(generic) = &mut path.path.segments.last_mut().unwrap().arguments {
-            /*match generic {
-                AngleBracketedGenericArguments { colon2_token: None, lt_token, args, gt_token } => {
-                    println!("adding fishtail");
-                    *generic = parse(quote! { ::#lt_token #args #gt_token }.into()).unwrap()
-                }
-                _ => ()
-            }*/
             if generic.colon2_token.is_none() {
-                //println!("adding fishtail");
                 generic.colon2_token = Some(parse(quote! { :: }.into()).unwrap());
-                //assert!(generic.colon2_token.is_some());
             }
         }
     }
-    let ty_clone = ty.clone();
-    println!("{}", quote! { #ty_clone });
-    ty
 }
 
-fn parse_args(args: TokenStream) -> Option<(Ident, Type)> {
-    match parse::<FnArg>(args.clone()) {
-        Ok(inner) => {
-            match inner {
-                Typed(inner) => {
-                    if inner.attrs.len() != 0 {
-                        panic!("Unexpected attribute")
+impl UseInnerArg {
+    pub fn get_ident(&self) -> Option<&Ident> {
+        match self {
+            Self::Full { field, .. } => Some(field),
+            Self::One(Type::Path(TypePath { qself: None, path: Path { leading_colon: None, segments} })) => {
+                if segments.len() == 1 {
+                    if let PathArguments::None = segments[0].arguments {
+                        Some(&segments[0].ident)
                     }
                     else {
-                        match *inner.pat {
-                            Pat::Ident(inner_ident) => {
-                                if inner_ident.attrs.len() != 0 || inner_ident.by_ref.is_some() 
-                                    || inner_ident.mutability.is_some() || inner_ident.subpat.is_some() 
-                                {
-                                    panic!("Unexpected token")
-                                }
-                                else {
-                                    Some((inner_ident.ident, *inner.ty))
-                                }
-                            }
-                            _ => None
-                        }
+                        None
                     }
                 }
-                _ => panic!("`self' is not a valid argument")
+                else {
+                    None
+                }
             }
+            _ => None
         }
-        Err(_) => None
+    }
+    
+    pub fn get_type(&self) -> &Type {
+        match self {
+            Self::Full { ty, .. } => ty,
+            Self::One(ty) => ty
+        }
     }
 }
-
-// impl UseInner for impl block and anything that it can contain (abstract const, abstract fn, etc.)
-
-/*#[proc_macro_attribute]
-pub fn impl_wrapper(args: TokenStream, item: TokenStream) -> TokenStream {
-    /*let wrapper: GenericPath = syn::parse(args).unwrap();
-    let ast: ItemImpl = syn::parse(item).unwrap();*/
-    if let Ok(wrapper) = syn::parse::<GenericPath>(args) {   
-        if let Ok(ast) = syn::parse::<ItemImpl>(item) {
-            let result = quote! {
-                #ast
-
-                /*impl #arg {
-                    #(#items)*
-                }*/
-            };
-            result.into()
-        }
-        else {
-            panic!()
-        }
-    }
-    else {
-        panic!()
-    }
-    // parse_macro_input!(item as ItemImpl);
-    //let wrapper = parse_macro_input!(args as Constraint);
-    //let args = parse_macro_input!(attr as AttributeArgs);'
-    /*for arg in attr {
-        println!("{}", arg)
-    }*/
-
-    /*let arg;
-    if args.len() == 1 {
-        if let NestedMeta::Meta(meta) = &args[0] {
-            if let Meta::Path(path) = meta {
-                arg = path;
-            }
-            else {
-                panic!("Expected path, received something else")
-            }
-        }
-        else {
-            panic!("Expected meta-item, received literal")
-        }
-    }
-    else {
-        panic!("Expected 1 argument, found {}", args.len());
-    }
-    let name = &ast.self_ty;
-    let items = &ast.items;*/
-
-    
-}*/
