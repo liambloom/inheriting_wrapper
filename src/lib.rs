@@ -179,99 +179,89 @@ impl Parse for Item {
 
 #[proc_macro_attribute]
 pub fn use_inner(args: TokenStream, item: TokenStream) -> TokenStream {
-    if let Ok(item) = parse::<TraitItem>(item) {
-        use TraitItem::*;
-        let out = match item {
-            Const(item) => match item {
-                TraitItemConst {attrs, const_token, ident, colon_token, ty, default: None, semi_token} => {
-                    let inner_type = get_type(args);
+    use TraitItem::*;
+  
+    // parse_macro_input! calls parse(), but then handles the error properly
+    let args = parse_macro_input!(args as UseInnerArg);// parse(args).unwrap();
+    let item = parse_macro_input!(item as TraitItem); //parse::<TraitItem>(item)
+    let out = match item {
+        Const(item) => match item {
+            TraitItemConst {attrs, const_token, ident, colon_token, ty, default: None, semi_token} => {
+                let inner_type = args.get_type();
 
-                    let c = quote! {
+                let c = quote! {
+                    #(#attrs)*
+                    #const_token #ident #colon_token #ty = #inner_type::#ident #semi_token
+                };
+
+                c
+            }
+            _ => panic!("Const already has a value")
+        },
+        Type(item) => match item {
+            TraitItemType { attrs, type_token, ident, generics, colon_token: None, 
+                bounds, default: None, semi_token } => {
+                    let inner_type = args.get_type();
+
+                    if !bounds.is_empty() {
+                        panic!("Unexpected type bound");
+                    }
+
+                    quote! {
                         #(#attrs)*
-                        #const_token #ident #colon_token #ty = #inner_type::#ident #semi_token
-                    };
-
-                    println!("What?");
-                    println!("{}", c.clone());
-
-                    c
+                        #type_token #ident #generics = #inner_type::ident #semi_token
+                    }
                 }
-                _ => panic!("Const already has a value")
-            },
-            Type(item) => match item {
-                TraitItemType { attrs, type_token, ident, generics, colon_token: None, 
-                    bounds, default: None, semi_token } => {
-                        let inner_type = get_type(args);
+            _ => panic!("Type already has a value") // TODO could be unexpected token ":"
+        } 
+        Method(item) => match item {
+            TraitItemMethod {attrs, sig, default: None, semi_token: Some(_)} => {
+                let fn_name = &sig.ident;
+                let mut fn_args = Punctuated::new();
 
-                        if !bounds.is_empty() {
-                            panic!("Unexpected type bound");
+                for arg in sig.inputs.pairs() {
+                    let (arg, punct) = arg.into_tuple();
+                    fn_args.push_value(match arg {
+                        Typed(arg) => match *arg.pat {
+                            Pat::Ident(ref arg) => &arg.ident,
+                            _ => panic!("Expected identifier")
                         }
+                        Receiver(_) => continue,
+                    });
+                    if let Some(punct) = punct {
+                        fn_args.push_punct(punct);
+                    }
+                }
+
+                match sig.inputs.first() {
+                    Some(Receiver(_)) => { // instance method
+                        let inner_field = args.get_ident();
 
                         quote! {
                             #(#attrs)*
-                            #type_token #ident #generics = #inner_type::ident #semi_token
-                        }
-                    }
-                _ => panic!("Type already has a value") // TODO could be unexpected token ":"
-            } 
-            Method(item) => match item {
-                TraitItemMethod {attrs, sig, default: None, semi_token: Some(_)} => {
-                    let fn_name = &sig.ident;
-                    let mut fn_args = Punctuated::new();
-
-                    for arg in sig.inputs.pairs() {
-                        let (arg, punct) = arg.into_tuple();
-                        fn_args.push_value(match arg {
-                            Typed(arg) => match *arg.pat.clone() {
-                                Pat::Ident(arg) => arg.ident,
-                                _ => panic!("Expected identifier")
+                            #sig {
+                                self.#inner_field.#fn_name(#fn_args)
                             }
-                            Receiver(_) => continue,
-                        });
-                        if let Some(punct) = punct {
-                            fn_args.push_punct(punct);
                         }
-                    }
+                    },
+                    _ => { // static method
+                        let inner_type = args.get_type();
 
-                    match sig.inputs.first() {
-                        Some(Receiver(_)) => { // instance method
-                            let inner_field = get_ident(args);
-
-                            quote! {
-                                #(#attrs)*
-                                #sig {
-                                    self.#inner_field.#fn_name(#fn_args)
-                                }
-                            }
-                        },
-                        _ => { // static method
-                            let inner_type = get_type(args);
-
-                            quote! {
-                                #(#attrs)*
-                                #sig {
-                                    #inner_type::#fn_name(#fn_args)
-                                }
+                        quote! {
+                            #(#attrs)*
+                            #sig {
+                                #inner_type::#fn_name(#fn_args)
                             }
                         }
                     }
-                },
-                _ => panic!("Fn already has a body") // TODO: could also be "expected semicolon"
-            }
-            _ => panic!("Unsupported item type")
-        };
-        out.into()
-    }
-    /*else if let Ok(item) = parse::<ItemImpl>(item) {
-        todo!()
-    }*/
-    // maybe an else-if-let
-    else {
-        panic!("Not an abstract item")
-    }
-    
-    // let arg = parse::<PatType? maybe>::(args)
-    // parse::<Anything that implements UseInner>::(item).use_inner(arg.ident, arg.type)
+                }
+            },
+            _ => panic!("Fn already has a body") // TODO: could also be "expected semicolon"
+        }
+        _ => panic!("Unsupported item type")
+    };
+    out.into()
+}
 }
 
 fn get_ident(args: TokenStream) -> Ident {
