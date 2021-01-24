@@ -97,7 +97,7 @@ enum Item {
     ConcreteConst(ImplItemConst),
     ConcreteMethod(ImplItemMethod),
     ConcreteType(ImplItemType),
-    Verbatim(TokenStream)
+    Verbatim(TokenStream2)
 }
 
 impl Parse for Item {
@@ -172,7 +172,7 @@ impl Parse for Item {
                     break;
                 }
             }
-            Ok(Self::Verbatim(tokens.into()))
+            Ok(Self::Verbatim(tokens))
         }
     }
 }
