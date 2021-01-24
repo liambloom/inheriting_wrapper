@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use std::iter;
+use std::{iter, ptr};
 // I'm importing like 20 things (and counting) from syn, so I just used the *
 use syn::{*, FnArg::*, ext::IdentExt, parse::{Parse, ParseStream}, punctuated::Punctuated};
 use quote::quote;
@@ -270,7 +270,10 @@ enum UseInnerArg {
         field: Ident,
         ty: Type
     },
-    One(Type),
+    Either {
+        field: *const Ident,
+        ty: Type,
+    },
 }
 
 impl Parse for UseInnerArg {
@@ -287,11 +290,31 @@ impl Parse for UseInnerArg {
             })
         }
         else {
-            Ok(Self::One({
-                let mut ty = input.parse()?;
-                add_fishtail(&mut ty);
-                ty
-            }))
+            let mut ty = input.parse()?;
+            add_fishtail(&mut ty);
+            Ok(Self::Either {
+                field: {
+                    // TODO: Maybe make lazy?
+                    // Probably not, despite being a fairly large block of code, it's not that computationally intensive
+                    if let Type::Path(TypePath { qself: None, path: Path { leading_colon: None, segments} }) = &ty {
+                        if segments.len() == 1 {
+                            if let PathArguments::None = segments[0].arguments {
+                                &segments[0].ident as *const Ident
+                            }
+                            else {
+                                ptr::null()
+                            }
+                        }
+                        else {
+                            ptr::null()
+                        }
+                    }
+                    else {
+                        ptr::null()
+                    }
+                },
+                ty,
+            })
         }
     }
 }
@@ -307,30 +330,17 @@ fn add_fishtail(ty: &mut Type) {
 }
 
 impl UseInnerArg {
-    pub fn get_ident(&self) -> Option<&Ident> {
+    pub fn get_ident<'a>(&'a self) -> Option<&'a Ident> {
         match self {
             Self::Full { field, .. } => Some(field),
-            Self::One(Type::Path(TypePath { qself: None, path: Path { leading_colon: None, segments} })) => {
-                if segments.len() == 1 {
-                    if let PathArguments::None = segments[0].arguments {
-                        Some(&segments[0].ident)
-                    }
-                    else {
-                        None
-                    }
-                }
-                else {
-                    None
-                }
-            }
-            _ => None
+            Self::Either { field, .. } => unsafe { field.as_ref() },
         }
     }
     
     pub fn get_type(&self) -> &Type {
         match self {
             Self::Full { ty, .. } => ty,
-            Self::One(ty) => ty
+            Self::Either { ty, .. } => ty
         }
     }
 }
