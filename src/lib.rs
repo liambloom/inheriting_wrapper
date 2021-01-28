@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use std::{iter, ptr};
 // I'm importing like 20 things (and counting) from syn, so I just used the *
-use syn::{*, FnArg::*, ext::IdentExt, parse::{Parse, ParseStream}, punctuated::Punctuated};
+use syn::{*, FnArg::*, ext::IdentExt, parse::{Parse, ParseStream, ParseBuffer}, punctuated::Punctuated};
 use quote::quote;
 
 // A lot of this code is copied (and modified) from syn
@@ -92,7 +92,77 @@ impl Parse for AbstractType {
     }
 }
 
-enum Item {
+enum AbstractItem {
+    Const(AbstractConst),
+    Method(AbstractMethod),
+    Type(AbstractType),
+}
+
+impl Parse for AbstractItem {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let attrs = input.call(Attribute::parse_outer)?;
+        let ahead = input.fork();
+        let vis = input.parse()?;
+        
+        let mut lookahead = input.lookahead1();
+        let defaultness = if lookahead.peek(Token![default]) && !input.peek2(Token![!]) {
+            let defaultness: Token![default] = input.parse()?;
+            lookahead = ahead.lookahead1();
+            Some(defaultness)
+        } else {
+            None
+        };
+
+        if input.peek(Token![const]) {
+            Ok(Self::Const(AbstractConst {
+                attrs,
+                vis,
+                defaultness,
+                const_token: input.parse()?,
+                ident: {
+                    let lookahead = input.lookahead1();
+                    if lookahead.peek(Ident) || lookahead.peek(Token![_]) {
+                        input.call(Ident::parse_any)?
+                    } else {
+                        return Err(lookahead.error());
+                    }
+                },
+                colon_token: input.parse()?,
+                ty: input.parse()?,
+                semi_token: input.parse()?,
+            }))
+        }
+        else if input.peek(Token![type]) {
+            Ok(Self::Type(AbstractType {
+                attrs,
+                vis,
+                defaultness,
+                type_token: input.parse()?,
+                ident: input.parse()?,
+                generics: {
+                    let mut generics: Generics = input.parse()?;
+                    generics.where_clause = input.parse()?;
+                    generics
+                },
+                semi_token: input.parse()?,
+            }))
+        }
+        else if input.peek(Token![fn]) {
+            Ok(Self::Method(AbstractMethod {
+                attrs,
+                vis,
+                defaultness,
+                sig: input.parse()?,
+                semi_token: input.parse()?,
+            }))
+        }
+        else {
+            Err(input.error("Expected `const', `type', or `fn'"))
+        }
+    }
+}
+
+enum MaybeAbstractItem {
     AbstractConst(AbstractConst),
     AbstractMethod(AbstractMethod),
     AbstractType(AbstractType),
@@ -102,7 +172,7 @@ enum Item {
     Verbatim(TokenStream2)
 }
 
-impl Parse for Item {
+impl Parse for MaybeAbstractItem {
     fn parse(input: ParseStream) -> Result<Self> {
         let begin = input.fork();
         let attrs = input.call(Attribute::parse_outer)?;
@@ -163,71 +233,64 @@ impl Parse for Item {
             todo!()
         }
         else {
-            let mut cursor = begin.cursor();
-            let mut tokens = TokenStream2::new();
-            loop {
-                if let Some((tt, next)) = cursor.token_tree() {
-                    tokens.extend(iter::once(tt));
-                    cursor = next;
-                }
-                else {
-                    break;
-                }
-            }
-            Ok(Self::Verbatim(tokens))
+            Ok(Self::Verbatim(verbatim_between(begin, input)))
         }
     }
 }
 
+// Taken from syn
+fn verbatim_between<'a>(begin: ParseBuffer<'a>, end: ParseStream<'a>) -> TokenStream2 {
+    let end = end.cursor();
+    let mut cursor = begin.cursor();
+    let mut tokens = TokenStream2::new();
+    while cursor != end {
+        let (tt, next) = cursor.token_tree().unwrap();
+        tokens.extend(iter::once(tt));
+        cursor = next;
+    }
+    tokens
+}
+
 #[proc_macro_attribute]
 pub fn use_inner(args: TokenStream, item: TokenStream) -> TokenStream {
-    use TraitItem::*;
+    use AbstractItem::*;
   
     // parse_macro_input! calls parse(), but then handles the error properly
-    let args = parse_macro_input!(args as UseInnerArg);// parse(args).unwrap();
-    let item = parse_macro_input!(item as TraitItem); //parse::<TraitItem>(item)
+    let args = parse_macro_input!(args as UseInnerArg);
+    let item = parse_macro_input!(item as AbstractItem);
+
     let out = match item {
         Const(item) => match item {
-            TraitItemConst {attrs, const_token, ident, colon_token, ty, default: None, semi_token} => {
+            AbstractConst {attrs, vis, defaultness, const_token, ident, colon_token, ty, semi_token} => {
                 let inner_type = args.get_type();
 
                 let c = quote! {
                     #(#attrs)*
-                    #const_token #ident #colon_token #ty = #inner_type::#ident #semi_token
+                    #vis #defaultness #const_token #ident #colon_token #ty = #inner_type::#ident #semi_token
                 };
 
                 c
             }
-            _ => panic!("Const already has a value")
         },
         Type(item) => match item {
-            TraitItemType { attrs, type_token, ident, generics, colon_token: None, 
-                bounds, default: None, semi_token } => {
-                    let inner_type = args.get_type();
+            AbstractType { attrs, vis, defaultness, type_token, ident, generics, semi_token } => {
+                let inner_type = args.get_type();
 
-                    if !bounds.is_empty() {
-                        panic!("Unexpected type bound");
-                    }
-
-                    quote! {
-                        #(#attrs)*
-                        #type_token #ident #generics = #inner_type::ident #semi_token
-                    }
+                quote! {
+                    #(#attrs)*
+                    #vis #defaultness #type_token #ident #generics = #inner_type::ident #semi_token
                 }
-            _ => panic!("Type already has a value") // TODO could be unexpected token ":"
+            }
         } 
         Method(item) => match item {
-            TraitItemMethod {attrs, sig, default: None, semi_token: Some(_)} => {
+            AbstractMethod {attrs, vis, defaultness, sig, .. } => {
                 let fn_name = &sig.ident;
                 let mut fn_args = Punctuated::new();
 
                 for arg in sig.inputs.pairs() {
                     let (arg, punct) = arg.into_tuple();
                     fn_args.push_value(match arg {
-                        Typed(arg) => match *arg.pat {
-                            Pat::Ident(ref arg) => &arg.ident,
-                            _ => panic!("Expected identifier")
-                        }
+                        Typed(arg) => arg,
                         Receiver(_) => continue,
                     });
                     if let Some(punct) = punct {
@@ -241,7 +304,7 @@ pub fn use_inner(args: TokenStream, item: TokenStream) -> TokenStream {
 
                         quote! {
                             #(#attrs)*
-                            #sig {
+                            #vis #defaultness #sig {
                                 self.#inner_field.#fn_name(#fn_args)
                             }
                         }
@@ -251,16 +314,14 @@ pub fn use_inner(args: TokenStream, item: TokenStream) -> TokenStream {
 
                         quote! {
                             #(#attrs)*
-                            #sig {
+                            #vis #defaultness #sig {
                                 #inner_type::#fn_name(#fn_args)
                             }
                         }
                     }
                 }
-            },
-            _ => panic!("Fn already has a body") // TODO: could also be "expected semicolon"
+            }
         }
-        _ => panic!("Unsupported item type")
     };
     out.into()
 }
@@ -278,7 +339,7 @@ enum UseInnerArg {
 
 impl Parse for UseInnerArg {
     fn parse(input: ParseStream) -> Result<Self> {
-        if input.peek2(Token![:]) {
+        if input.peek2(Token![:]) && !input.peek2(Token![::]) {
             Ok(Self::Full {
                 field: input.parse()?,
                 ty: {
@@ -296,6 +357,7 @@ impl Parse for UseInnerArg {
                 field: {
                     // TODO: Maybe make lazy?
                     // Probably not, despite being a fairly large block of code, it's not that computationally intensive
+                    // And making it lazy would require either mutability or multiple pointers/references
                     if let Type::Path(TypePath { qself: None, path: Path { leading_colon: None, segments} }) = &ty {
                         if segments.len() == 1 {
                             if let PathArguments::None = segments[0].arguments {
@@ -321,7 +383,7 @@ impl Parse for UseInnerArg {
 
 fn add_fishtail(ty: &mut Type) {
     if let Type::Path(path) = ty {
-        if let PathArguments::AngleBracketed(generic) = &mut path.path.segments.last_mut().unwrap().arguments {
+        if let PathArguments::AngleBracketed(generic) = &mut path.path.segments.last_mut().expect("Empty path").arguments {
             if generic.colon2_token.is_none() {
                 generic.colon2_token = Some(parse(quote! { :: }.into()).unwrap());
             }
