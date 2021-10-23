@@ -68,7 +68,7 @@ struct AbstractType {
     pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub defaultness: Option<Token![default]>,
-    pub type_token: Type,
+    pub type_token: Token![type],
     pub ident: Ident,
     pub generics: Generics,
     pub semi_token: Token![;],
@@ -101,13 +101,11 @@ enum AbstractItem {
 impl Parse for AbstractItem {
     fn parse(input: ParseStream) -> Result<Self> {
         let attrs = input.call(Attribute::parse_outer)?;
-        let ahead = input.fork();
         let vis = input.parse()?;
         
-        let mut lookahead = input.lookahead1();
+        let lookahead = input.lookahead1();
         let defaultness = if lookahead.peek(Token![default]) && !input.peek2(Token![!]) {
             let defaultness: Token![default] = input.parse()?;
-            lookahead = ahead.lookahead1();
             Some(defaultness)
         } else {
             None
@@ -177,15 +175,7 @@ impl Parse for MaybeAbstractItem {
         let begin = input.fork();
         let attrs = input.call(Attribute::parse_outer)?;
         let vis = input.parse()?;
-        
-        let mut lookahead = input.lookahead1();
-        let defaultness = if lookahead.peek(Token![default]) && !input.peek2(Token![!]) {
-            let defaultness: Token![default] = input.parse()?;
-            lookahead = input.lookahead1();
-            Some(defaultness)
-        } else {
-            None
-        };
+        let defaultness = input.parse()?;
 
         if input.peek(Token![const]) {
             let const_token = input.parse()?;
@@ -199,7 +189,8 @@ impl Parse for MaybeAbstractItem {
             };
             let colon_token = input.parse()?;
             let ty = input.parse()?;
-            if input.peek(Token![=]) {
+            let lookahead = input.lookahead1();
+            if lookahead.peek(Token![=]) {
                 Ok(Self::ConcreteConst(ImplItemConst {
                     attrs,
                     vis,
@@ -213,7 +204,7 @@ impl Parse for MaybeAbstractItem {
                     semi_token: input.parse()?,
                 }))
             }
-            else {
+            else if lookahead.peek(Token![;]) {
                 Ok(Self::AbstractConst(AbstractConst {
                     attrs,
                     vis,
@@ -225,12 +216,81 @@ impl Parse for MaybeAbstractItem {
                     semi_token: input.parse()?,
                 }))
             }
+            else {
+                Err(lookahead.error())
+            }
         }
         else if input.peek(Token![type]) {
-            todo!()
+            let type_token = input.parse()?;
+            let ident = input.parse()?;
+            let generics = {
+                let mut generics: Generics = input.parse()?;
+                generics.where_clause = input.parse()?;
+                generics
+            };
+            let lookahead = input.lookahead1();
+            if lookahead.peek(Token![=]) {
+                Ok(Self::ConcreteType(ImplItemType {
+                    attrs,
+                    vis,
+                    defaultness,
+                    type_token,
+                    ident,
+                    generics,
+                    eq_token: input.parse()?,
+                    ty: input.parse()?,
+                    semi_token: input.parse()?,
+                }))
+            }
+            else if lookahead.peek(Token![;]) {
+                Ok(Self::AbstractType(AbstractType {
+                    attrs,
+                    vis,
+                    defaultness,
+                    type_token,
+                    ident,
+                    generics,
+                    semi_token: input.parse()?,
+
+                }))
+            }
+            else {
+                Err(lookahead.error())
+            }
         }
         else if input.peek(Token![fn]) {
-            todo!()
+            let mut attrs = input.call(Attribute::parse_outer)?;
+            let vis: Visibility = input.parse()?;
+            let defaultness: Option<Token![default]> = input.parse()?;
+            let sig: Signature = input.parse()?;
+            let lookahead = input.lookahead1();
+
+            if lookahead.peek(Token![;]) {
+                Ok(Self::AbstractMethod(AbstractMethod {
+                    attrs,
+                    vis,
+                    defaultness,
+                    sig,
+                    semi_token: input.parse()?
+                }))
+            }
+            else {
+                Ok(Self::ConcreteMethod(ImplItemMethod {
+                    vis,
+                    defaultness,
+                    sig,
+                    block: {
+                        let content;
+                        let brace_token = braced!(content in input);
+                        attrs.extend(content.call(Attribute::parse_inner)?);
+                        Block {
+                            brace_token,
+                            stmts: content.call(Block::parse_within)?,
+                        }
+                    },
+                    attrs,
+                }))
+            }
         }
         else {
             Ok(Self::Verbatim(verbatim_between(begin, input)))
